@@ -9,6 +9,7 @@ const DEFAULT_CDP = "http://127.0.0.1:59224";
 const DEFAULT_ASSIGNMENT_JSON = "../chaoxing-grader/score_rankings_behinder_adjusted.json";
 const DEFAULT_OUT_DIR = "out/final-grades";
 const DEFAULT_ALIAS_JSON = "data/discussion-aliases.json";
+const DEFAULT_EXCLUDED_JSON = "data/excluded-students.json";
 const PASS_THRESHOLD = 60;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     assignmentJson: DEFAULT_ASSIGNMENT_JSON,
     outDir: DEFAULT_OUT_DIR,
     aliasJson: DEFAULT_ALIAS_JSON,
+    excludedJson: DEFAULT_EXCLUDED_JSON,
     term: "2025-2026,2",
     teacher: "z20220230804",
     minOrdinaryWeight: 0.2,
@@ -58,6 +60,7 @@ function parseArgs(argv) {
     else if (arg === "--assignment-json") args.assignmentJson = next, i += 1;
     else if (arg === "--out-dir") args.outDir = next, i += 1;
     else if (arg === "--alias-json") args.aliasJson = next, i += 1;
+    else if (arg === "--excluded-json") args.excludedJson = next, i += 1;
     else if (arg === "--term") args.term = next, i += 1;
     else if (arg === "--teacher") args.teacher = next, i += 1;
     else if (arg === "--min-ordinary-weight") args.minOrdinaryWeight = Number(next), i += 1;
@@ -72,6 +75,7 @@ Options:
   --assignment-json <file>        assignment ranking JSON, default ${DEFAULT_ASSIGNMENT_JSON}
   --out-dir <dir>                 output directory, default ${DEFAULT_OUT_DIR}
   --alias-json <file>             local discussion alias map, default ${DEFAULT_ALIAS_JSON}
+  --excluded-json <file>          local student exclusion list, default ${DEFAULT_EXCLUDED_JSON}
   --term <term>                   attendance term, default 2025-2026,2
   --teacher <teacher-code>        attendance teacher filter, default z20220230804
   --min-ordinary-weight <number>  constrained search lower bound, default 0.2
@@ -200,20 +204,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function loadAssignmentRows(assignmentJson) {
+function loadAssignmentRows(assignmentJson, excludedStudents = { names: new Set(), studentNos: new Set() }) {
   const source = readJson(assignmentJson);
   const classRows = new Map();
   const rosterByNo = new Map();
   const rosterByName = new Map();
+  const excludedRows = [];
 
   for (const classSummary of source.classSummaries || []) {
     const rows = [];
     for (const row of classSummary.rows || []) {
+      const studentNo = String(row.studentNo || "");
+      const name = String(row.name || "");
+      if (excludedStudents.studentNos.has(studentNo) || excludedStudents.names.has(name)) {
+        excludedRows.push({ className: classSummary.className, studentNo, name });
+        continue;
+      }
       const assignmentAverage = (Number(row.finalTotal || 0) / Number(classSummary.assignmentCount || 1));
       const normalized = {
         className: classSummary.className,
-        name: row.name,
-        studentNo: String(row.studentNo || ""),
+        name,
+        studentNo,
         assignmentAverage: round(assignmentAverage),
         assignmentFinalTotal: Number(row.finalTotal || 0),
         assignmentCount: Number(classSummary.assignmentCount || 0),
@@ -226,7 +237,7 @@ function loadAssignmentRows(assignmentJson) {
     classRows.set(classSummary.className, rows);
   }
 
-  return { generatedAt: source.generatedAt, classRows, rosterByNo, rosterByName };
+  return { generatedAt: source.generatedAt, classRows, rosterByNo, rosterByName, excludedRows };
 }
 
 function loadAliasMap(aliasJson) {
@@ -236,6 +247,23 @@ function loadAliasMap(aliasJson) {
   return new Map(
     Object.entries(source || {}).map(([alias, realName]) => [String(alias).trim().toLowerCase(), String(realName).trim()]),
   );
+}
+
+function loadExcludedStudents(excludedJson) {
+  const resolved = path.resolve(excludedJson);
+  if (!fs.existsSync(resolved)) return { names: new Set(), studentNos: new Set(), raw: [] };
+  const source = readJson(resolved);
+  const items = Array.isArray(source) ? source : source.excluded || [];
+  const names = new Set();
+  const studentNos = new Set();
+  for (const item of items) {
+    if (typeof item === "string") names.add(item.trim());
+    else {
+      if (item.name) names.add(String(item.name).trim());
+      if (item.studentNo) studentNos.add(String(item.studentNo).trim());
+    }
+  }
+  return { names, studentNos, raw: items };
 }
 
 async function collectExamScores(cdpBase) {
@@ -360,7 +388,15 @@ async function collectDiscussionSuccess(cdpBase, rosterByName, aliasMap) {
     if (!page && pageHeaderTarget) page = new CdpClient(pageHeaderTarget.webSocketDebuggerUrl);
     if (!page) return { byClass: new Map(), rawText: "", warning: "discussion page not found" };
 
-    const rawText = await page.eval(`(() => document.body.innerText)()`, 10000);
+    let rawText = await page.eval(`(() => document.body.innerText)()`, 10000);
+    if (!rawText.includes("存储XSS")) {
+      rawText = await waitForEval(
+        page,
+        `(() => document.body.innerText)()`,
+        (value) => String(value || "").includes("存储XSS"),
+        25000,
+      );
+    }
     const parsed = parseDiscussionSuccess(rawText, rosterByName, aliasMap);
     console.log(
       `discussion success: ${[...parsed.byClass.entries()]
@@ -505,7 +541,7 @@ async function collectAttendance(cdpBase, term, teacher) {
       });
       const wantedClasses = new Set(["信安24-01", "信安24实验班", "2024信安实验班", "信安25-04", "信安2504"]);
       const records = (teacherRecords.records || []).filter((record) =>
-        (record.tno === ${JSON.stringify(teacher)} || record.teacherName === "傅继晗") &&
+        (record.tno === ${JSON.stringify(teacher)} || record.teacherName === ${JSON.stringify(teacher)}) &&
         wantedClasses.has(record.className) &&
         (!record.schoolYear || String(record.schoolYear).includes("2025-2026")) &&
         (!record.schoolTerm || String(record.schoolTerm).includes("2"))
@@ -710,9 +746,28 @@ function writeOutputs(outDir, classes, metadata) {
 
   const htmlPath = path.join(outDir, "final-grade-report.html");
   fs.writeFileSync(htmlPath, renderHtml(classes, metadata));
-  const xlsxPath = path.join(outDir, "final-grade-report.xlsx");
-  writeXlsx(jsonPath, xlsxPath);
+  let xlsxPath = path.join(outDir, "final-grade-report.xlsx");
+  try {
+    writeXlsx(jsonPath, xlsxPath);
+  } catch (error) {
+    if (!String(error.message || error).includes("Permission denied")) throw error;
+    xlsxPath = path.join(outDir, `final-grade-report-${timestampForFilename(new Date())}.xlsx`);
+    writeXlsx(jsonPath, xlsxPath);
+  }
   return { jsonPath, htmlPath, xlsxPath };
+}
+
+function timestampForFilename(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("");
 }
 
 function writeXlsx(jsonPath, xlsxPath) {
@@ -811,11 +866,13 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const assignmentPath = path.resolve(args.assignmentJson);
   const outDir = path.resolve(args.outDir);
-  const assignment = loadAssignmentRows(assignmentPath);
+  const excludedStudents = loadExcludedStudents(args.excludedJson);
+  const assignment = loadAssignmentRows(assignmentPath, excludedStudents);
   const aliasMap = loadAliasMap(args.aliasJson);
 
   console.log(`assignment source: ${assignmentPath}`);
   if (aliasMap.size) console.log(`discussion aliases: ${aliasMap.size}`);
+  if (assignment.excludedRows.length) console.log(`excluded rows: ${assignment.excludedRows.length}`);
   const [examScores, discussion, attendance] = await Promise.all([
     collectExamScores(args.cdp),
     collectDiscussionSuccess(args.cdp, assignment.rosterByName, aliasMap),
@@ -842,6 +899,7 @@ async function main() {
       tieBreaker: "within equal pass counts, choose ordinary weight closest to 40%",
       constrainedSearch: [args.minOrdinaryWeight, args.maxOrdinaryWeight],
     },
+    excludedRows: assignment.excludedRows,
   };
   const outputs = writeOutputs(outDir, scored, metadata);
 

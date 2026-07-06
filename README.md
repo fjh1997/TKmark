@@ -31,6 +31,7 @@ npm run final-grades -- \
   --cdp http://127.0.0.1:59224 \
   --assignment-json ../chaoxing-grader/score_rankings_behinder_adjusted.json \
   --alias-json data/discussion-aliases.json \
+  --excluded-json data/excluded-students.json \
   --out-dir out/final-grades-20260706
 ```
 
@@ -81,3 +82,16 @@ node scripts/final-grade-report.mjs --help
 ```
 
 `data/` 已被忽略，不会推送到 GitHub。
+
+如果 roster 里混入教师、休学或不应统计的人员，本地创建 `data/excluded-students.json`：
+
+```json
+{
+  "excluded": [
+    { "studentNo": "学号或工号" },
+    { "name": "姓名" }
+  ]
+}
+```
+
+排除名单只影响最终成绩统计、比例优化和导出的 Excel，不会修改原始采集数据。
