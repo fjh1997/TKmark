@@ -16,6 +16,7 @@ HEADERS = [
     "学号",
     "姓名",
     "平时成绩",
+    "平时原始分",
     "期末成绩",
     "最终成绩",
     "是否及格",
@@ -45,6 +46,7 @@ def build_row(index: int, row: dict) -> list:
         str(value(row, "studentNo")),
         value(row, "name"),
         value(row, "ordinaryScore"),
+        value(row, "ordinaryRawScore"),
         value(row, "examScore"),
         value(row, "finalScore"),
         "及格" if value(row, "passed") else "不及格",
@@ -70,7 +72,7 @@ def autosize(ws):
         max_length = max(len(str(cell.value or "")) for cell in column)
         ws.column_dimensions[letter].width = min(max(max_length + 2, 10), 48)
     ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["T"].width = 48
+    ws.column_dimensions["U"].width = 48
 
 
 def style_sheet(ws):
@@ -87,8 +89,8 @@ def style_sheet(ws):
         row[1].number_format = "@"
         row[1].value = str(row[1].value or "")
         for cell in row:
-            cell.alignment = Alignment(vertical="center", wrap_text=cell.column >= 19)
-        if row[6].value == "不及格":
+            cell.alignment = Alignment(vertical="center", wrap_text=cell.column >= 20)
+        if row[7].value == "不及格":
             for cell in row:
                 cell.fill = fail_fill
 

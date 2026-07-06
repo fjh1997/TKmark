@@ -50,6 +50,7 @@ function parseArgs(argv) {
     teacher: "z20220230804",
     minOrdinaryWeight: 0.2,
     maxOrdinaryWeight: 0.6,
+    ordinaryNormalization: "top-per-class",
     step: 0.01,
   };
 
@@ -65,6 +66,7 @@ function parseArgs(argv) {
     else if (arg === "--teacher") args.teacher = next, i += 1;
     else if (arg === "--min-ordinary-weight") args.minOrdinaryWeight = Number(next), i += 1;
     else if (arg === "--max-ordinary-weight") args.maxOrdinaryWeight = Number(next), i += 1;
+    else if (arg === "--ordinary-normalization") args.ordinaryNormalization = next, i += 1;
     else if (arg === "--step") args.step = Number(next), i += 1;
     else if (arg === "--help") {
       console.log(`Usage:
@@ -80,6 +82,7 @@ Options:
   --teacher <teacher-code>        attendance teacher filter, default z20220230804
   --min-ordinary-weight <number>  constrained search lower bound, default 0.2
   --max-ordinary-weight <number>  constrained search upper bound, default 0.6
+  --ordinary-normalization <mode>  none or top-per-class, default top-per-class
   --step <number>                 ratio search step, default 0.01
 `);
       process.exit(0);
@@ -633,7 +636,7 @@ function attendanceScore(row) {
   return { score: round(clamp(100 - penalty)), penalty: round(penalty), note };
 }
 
-function buildGrades({ assignment, examScores, discussion, attendance }) {
+function buildGrades({ assignment, examScores, discussion, attendance, ordinaryNormalization }) {
   const attendanceByNo = new Map();
   for (const row of attendance.rows || []) {
     const normalizedClass = CLASS_NAME_ALIASES.get(row.className) || row.className;
@@ -646,19 +649,21 @@ function buildGrades({ assignment, examScores, discussion, attendance }) {
   }
 
   const classes = new Map();
+  const normalization = { mode: ordinaryNormalization, classMaxRaw: {} };
   for (const [className, rows] of assignment.classRows) {
     const tableRows = rows.map((row) => {
       const attendanceRow = attendanceByNo.get(row.studentNo);
       const att = attendanceScore(attendanceRow);
       const discussionSet = discussion.byClass.get(className) || new Set();
       const discussionBonus = discussionSet.has(row.name) ? 5 : 0;
-      const ordinaryScore = round(clamp(row.assignmentAverage * 0.85 + att.score * 0.10 + discussionBonus));
+      const ordinaryRawScore = round(clamp(row.assignmentAverage * 0.85 + att.score * 0.10 + discussionBonus));
       const exam = examByNo.get(row.studentNo);
       return {
         className,
         studentNo: row.studentNo,
         name: row.name,
-        ordinaryScore,
+        ordinaryRawScore,
+        ordinaryScore: ordinaryRawScore,
         examScore: round(Number(exam?.score ?? 0)),
         assignmentAverage: row.assignmentAverage,
         discussionBonus,
@@ -677,9 +682,16 @@ function buildGrades({ assignment, examScores, discussion, attendance }) {
         examSubmitTime: exam?.submitTime || "",
       };
     });
+    const classMaxRaw = Math.max(...tableRows.map((row) => row.ordinaryRawScore), 0);
+    normalization.classMaxRaw[className] = round(classMaxRaw);
+    if (ordinaryNormalization === "top-per-class" && classMaxRaw > 0) {
+      for (const row of tableRows) {
+        row.ordinaryScore = round(clamp((row.ordinaryRawScore / classMaxRaw) * 100));
+      }
+    }
     classes.set(className, tableRows);
   }
-  return classes;
+  return { classes, normalization };
 }
 
 function optimizeWeights(classes, minOrdinaryWeight, maxOrdinaryWeight, step) {
@@ -794,6 +806,7 @@ function renderHtml(classes, metadata) {
             <td>${htmlEscape(row.studentNo)}</td>
             <td>${htmlEscape(row.name)}</td>
             <td>${row.ordinaryScore}</td>
+            <td>${row.ordinaryRawScore}</td>
             <td>${row.examScore}</td>
             <td>${row.finalScore}</td>
             <td>${row.passed ? "及格" : "不及格"}</td>
@@ -818,7 +831,7 @@ function renderHtml(classes, metadata) {
         <table>
           <thead>
             <tr>
-              <th>排名</th><th>学号</th><th>姓名</th><th>平时成绩</th><th>期末成绩</th><th>最终成绩</th><th>状态</th>
+              <th>排名</th><th>学号</th><th>姓名</th><th>平时成绩</th><th>平时原始分</th><th>期末成绩</th><th>最终成绩</th><th>状态</th>
               <th>作业均分</th><th>讨论加分</th><th>考勤分</th><th>未签到</th><th>请假</th><th>公假</th><th>私假</th><th>病假</th><th>未分类请假</th><th>迟到</th><th>早退</th><th>考勤备注</th><th>请假明细</th>
             </tr>
           </thead>
@@ -851,7 +864,7 @@ function renderHtml(classes, metadata) {
     生成时间：${htmlEscape(metadata.generatedAt)}<br>
     采用比例：平时 ${round(metadata.selected.ordinaryWeight * 100, 0)}% / 期末 ${round(metadata.selected.examWeight * 100, 0)}%，及格线 ${PASS_THRESHOLD} 分。<br>
     常规范围最优：平时 ${round(metadata.optimization.constrained.ordinaryWeight * 100, 0)}% / 期末 ${round(metadata.optimization.constrained.examWeight * 100, 0)}%，及格 ${metadata.optimization.constrained.passCount} 人。无限制搜索最优：平时 ${round(metadata.optimization.unconstrained.ordinaryWeight * 100, 0)}% / 期末 ${round(metadata.optimization.unconstrained.examWeight * 100, 0)}%，及格 ${metadata.optimization.unconstrained.passCount} 人。<br>
-    平时成绩 = 作业均分 * 85% + 考勤分 * 10% + 存储 XSS 成功弹窗讨论加分 5 分，封顶 100。
+    平时原始分 = 作业均分 * 85% + 考勤分 * 10% + 存储 XSS 成功弹窗讨论加分 5 分，封顶 100；平时成绩按同班最高原始分归一到 100。
   </div>
   <table>
     <thead><tr><th>班级</th><th>人数</th><th>及格人数</th><th>不及格人数</th><th>最终均分</th></tr></thead>
@@ -882,7 +895,13 @@ async function main() {
   if (discussion.warning) console.warn(`discussion warning: ${discussion.warning}`);
   if (attendance.warning) console.warn(`attendance warning: ${attendance.warning}`);
 
-  const classes = buildGrades({ assignment, examScores, discussion, attendance });
+  const { classes, normalization } = buildGrades({
+    assignment,
+    examScores,
+    discussion,
+    attendance,
+    ordinaryNormalization: args.ordinaryNormalization,
+  });
   const optimization = optimizeWeights(classes, args.minOrdinaryWeight, args.maxOrdinaryWeight, args.step);
   const selected = optimization.constrained;
   const scored = applyFinalScores(classes, selected.ordinaryWeight);
@@ -894,11 +913,16 @@ async function main() {
     optimization,
     scoringPolicy: {
       passThreshold: PASS_THRESHOLD,
-      ordinaryScore: "assignmentAverage * 0.85 + attendanceScore * 0.10 + discussionBonus(5)",
+      ordinaryRawScore: "assignmentAverage * 0.85 + attendanceScore * 0.10 + discussionBonus(5)",
+      ordinaryScore: args.ordinaryNormalization === "top-per-class"
+        ? "ordinaryRawScore / classMaxRawOrdinaryScore * 100"
+        : "ordinaryRawScore",
+      ordinaryNormalization: args.ordinaryNormalization,
       attendancePenalty: "notSign*3 + publicLeave*0.5 + sickLeave*1 + privateLeave*1.5 + unknownLeave*1.5 + late*1 + early*1",
       tieBreaker: "within equal pass counts, choose ordinary weight closest to 40%",
       constrainedSearch: [args.minOrdinaryWeight, args.maxOrdinaryWeight],
     },
+    ordinaryNormalization: normalization,
     excludedRows: assignment.excludedRows,
   };
   const outputs = writeOutputs(outDir, scored, metadata);
