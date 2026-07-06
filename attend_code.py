@@ -1,89 +1,102 @@
+#!/usr/bin/env python3
+"""Export attendance leave and absence details without hard-coded credentials.
+
+Set ATTEND_ACCESS_TOKEN to the token from the current browser session. If the
+attendance system also requires cookies in your environment, set ATTEND_COOKIE.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from typing import Any
+
 import requests
-import json
-cookies = {
-    '_ga': 'GA1.3.1381716507.1711415172',
-    '_ga_QYKCGTHFGK': 'GS1.3.1728471665.1.1.1728471688.0.0.0',
-    'JSESSIONID': '308AED6DDCF9F77B303AE268B192703A',
-}
-
-headers = {
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    # 'Cookie': '_ga=GA1.3.1381716507.1711415172; _ga_QYKCGTHFGK=GS1.3.1728471665.1.1.1728471688.0.0.0; JSESSIONID=308AED6DDCF9F77B303AE268B192703A',
-    'Pragma': 'no-cache',
-    'Referer': 'https://newca.zjtongji.edu.cn/attend/start/index.html?t=1736736280533',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 Edg/131.0.0.0',
-    'X-Requested-With': 'XMLHttpRequest',
-    'access-token': 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3MzY4MTM3NzAsInVzZXJuYW1lIjoiejIwMjIwMjMwODA0In0.jUakhE5yLP5kOSkzF2SpAIIrqeulEXwpGhr3jkWEc4w',
-    'sec-ch-ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    'sec-ch-ua-mobile': '?1',
-    'sec-ch-ua-platform': '"Android"',
-}
-
-params = {
-    'page': '1',
-    'rows': '100',
-    'sort': 'c_day',
-    'order': 'desc',
-    'dateEnd': '',
-    'dateStart': '',
-    'courseId': '',
-    'className': '',
-    '_t': '1736736287620',
-}
-
-response = requests.get(
-    'https://newca.zjtongji.edu.cn/attendng/attend/m/teaRecord/list',
-    params=params,
-    cookies=cookies,
-    headers=headers,
-)
-data=response.json()
-
-# 筛选 "className" 和 "courseName" 的记录
-filtered_ids = [
-     { "id" :record["id"],"day":record['cday']}
-    for record in data["result"]["records"]
-    if record["className"] == "信安23-01" and record["courseName"] == "Linux操作系统安全配置"
-]
-
-#print(filtered_ids)
 
 
-def course(day,stu):
-    response = requests.get(
-        f'https://newca.zjtongji.edu.cn/attendng/attend/m/teaRecord/getById/{stu["id"]}?_t=1736737564790',
-        cookies=cookies,
-        headers=headers,
-    )
-    data=response.json()
-    id=data["result"]['scheduleId']
+BASE_URL = os.environ.get("ATTEND_BASE_URL", "https://newca.zjtongji.edu.cn/attendng")
+ACCESS_TOKEN = os.environ.get("ATTEND_ACCESS_TOKEN", "")
+COOKIE = os.environ.get("ATTEND_COOKIE", "")
 
-    params = {
-        'scheduleId': id,
-        'stuName': '',
-        'lateStatus': '',
-        '_t': '1736737716679',
+
+def require_env() -> None:
+    if not ACCESS_TOKEN:
+        print("ATTEND_ACCESS_TOKEN is required.", file=sys.stderr)
+        sys.exit(2)
+
+
+def headers() -> dict[str, str]:
+    result = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "User-Agent": "Mozilla/5.0",
+        "X-Requested-With": "XMLHttpRequest",
+        "access-token": ACCESS_TOKEN,
     }
+    if COOKIE:
+        result["Cookie"] = COOKIE
+    return result
 
-    response = requests.get(
-        'https://newca.zjtongji.edu.cn/attendng/attend/m/stuRecord/getStuRecordsByStatus',
-        params=params,
-        cookies=cookies,
-        headers=headers,
+
+def get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    params = dict(params or {})
+    params.setdefault("_t", str(int(time.time() * 1000)))
+    response = requests.get(f"{BASE_URL}/{path.lstrip('/')}", params=params, headers=headers(), timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if not data.get("success"):
+        raise RuntimeError(data.get("message") or data)
+    return data
+
+
+def list_teacher_records(course_name: str, class_name: str) -> list[dict[str, Any]]:
+    data = get_json(
+        "attend/m/teaRecord/list",
+        {
+            "page": "1",
+            "rows": "200",
+            "sort": "c_day",
+            "order": "desc",
+            "dateEnd": "",
+            "dateStart": "",
+            "courseId": "",
+            "className": "",
+        },
     )
-    data=response.json()
-    #print(json.dumps(data, ensure_ascii=False))
-    for stu in data["result"]['2']:
-        print(day+','+stu['stuName']+','+stu['leaveReason'])
-    for stu in data["result"]['1']:
-        print(day+','+stu['stuName']+',缺勤')
-#print(len(filtered_ids))
-print("日期,姓名,原因")
-for stu in filtered_ids:
-    course(stu['day'],stu)
+    records = data.get("result", {}).get("records", [])
+    return [
+        record
+        for record in records
+        if record.get("className") == class_name and record.get("courseName") == course_name
+    ]
+
+
+def print_absence_details(course_name: str, class_name: str) -> None:
+    print("日期,姓名,原因")
+    for record in list_teacher_records(course_name, class_name):
+        detail = get_json(f"attend/m/teaRecord/getById/{record['id']}")
+        schedule_id = detail.get("result", {}).get("scheduleId")
+        if not schedule_id:
+            continue
+        students = get_json(
+            "attend/m/stuRecord/getStuRecordsByStatus",
+            {"scheduleId": schedule_id, "stuName": "", "lateStatus": ""},
+        ).get("result", {})
+        for student in students.get("2", []):
+            print(f"{record.get('cday','')},{student.get('stuName','')},{student.get('leaveReason','请假')}")
+        for student in students.get("1", []):
+            print(f"{record.get('cday','')},{student.get('stuName','')},缺勤")
+
+
+def main() -> None:
+    require_env()
+    course_name = os.environ.get("ATTEND_COURSE_NAME", "")
+    class_name = os.environ.get("ATTEND_CLASS_NAME", "")
+    if not course_name or not class_name:
+        print("ATTEND_COURSE_NAME and ATTEND_CLASS_NAME are required.", file=sys.stderr)
+        sys.exit(2)
+    print_absence_details(course_name, class_name)
+
+
+if __name__ == "__main__":
+    main()

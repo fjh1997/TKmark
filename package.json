@@ -1,13 +1,16 @@
 {
-  "name": "mark",
+  "name": "tkmark",
   "version": "1.0.0",
-  "description": "",
+  "description": "超星作业批改脚本",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node mark.mjs"
+    "start": "node mark.mjs",
+    "final-grades": "node scripts/final-grade-report.mjs"
   },
-  "keywords": [],
+  "keywords": [
+    "chaoxing",
+    "grading"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {

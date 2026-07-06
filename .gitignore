@@ -1,0 +1,13 @@
+node_modules/
+my-user-data/
+__pycache__/
+data/
+out/
+.env
+.env.*
+*.log
+*.csv
+*.xlsx
+*.json
+!package.json
+!package-lock.json
