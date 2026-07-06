@@ -2,12 +2,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_CDP = "http://127.0.0.1:59224";
 const DEFAULT_ASSIGNMENT_JSON = "../chaoxing-grader/score_rankings_behinder_adjusted.json";
 const DEFAULT_OUT_DIR = "out/final-grades";
 const DEFAULT_ALIAS_JSON = "data/discussion-aliases.json";
 const PASS_THRESHOLD = 60;
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const EXAM_LINKS = [
   {
@@ -28,6 +31,7 @@ const DISCUSSION_URL =
   "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/tch?courseid=241341550&clazzid=142139151&cpi=342110777&enc=7cfc95c1e5cabbac38f50557f8386d71&t=1783341242823&pageHeader=5&v=2&hideHead=0&perspectiveType=";
 
 const CLASS_NAME_ALIASES = new Map([
+  ["2024信安实验班", "信安24实验班"],
   ["信安25-04", "信安2504"],
   ["信安24实验班", "信安24实验班"],
   ["信安24-01", "信安24-01"],
@@ -442,7 +446,18 @@ async function collectAttendance(cdpBase, term, teacher) {
       const tokenName = layui.setter.request.tokenName;
       const token = layui.sessionData(layui.setter.tableName)[tokenName];
       if (!token) throw new Error("attendance token not found in browser session");
-      const params = new URLSearchParams({
+      async function getJson(path, params = {}) {
+        params._t = String(Date.now());
+        const response = await fetch("/attendng/" + path + "?" + new URLSearchParams(params), {
+          headers: { [tokenName]: token },
+          credentials: "include",
+        });
+        const json = await response.json();
+        if (!json.success) throw new Error(json.message || path + " request failed");
+        return json.result;
+      }
+
+      const summary = await getJson("attend/c/dean/getStuAttend/yearTerm", {
         page: "1",
         rows: "500",
         timeType: "yearTerm",
@@ -454,30 +469,102 @@ async function collectAttendance(cdpBase, term, teacher) {
         teacherName: ${JSON.stringify(teacher)},
         param1: ${JSON.stringify(term)},
         param2: "",
-        _t: String(Date.now()),
       });
-      const response = await fetch("/attendng/attend/c/dean/getStuAttend/yearTerm?" + params, {
-        headers: { [tokenName]: token },
-        credentials: "include",
+      const byNo = new Map();
+      for (const row of summary.records || []) {
+        byNo.set(String(row.sno || row.stuNo || row.loginName || ""), {
+          studentNo: String(row.sno || row.stuNo || row.loginName || ""),
+          name: row.stuName || row.name || "",
+          className: row.className || "",
+          courseName: row.courseName || "",
+          signCount: Number(row.signCount || 0),
+          total: Number(row.total || 0),
+          notSignCount: Number(row.notSignCount || 0),
+          leaveCount: Number(row.leaveCount || 0),
+          lateCount: Number(row.lateCount || 0),
+          earlyCount: Number(row.earlyCount || 0),
+          signInRate: Number(row.signInRate || 0),
+          publicLeaveCount: 0,
+          privateLeaveCount: 0,
+          sickLeaveCount: 0,
+          unknownLeaveCount: 0,
+          leaveReasons: [],
+          attendanceEvents: [],
+        });
+      }
+
+      const teacherRecords = await getJson("attend/m/teaRecord/list", {
+        page: "1",
+        rows: "500",
+        sort: "c_day",
+        order: "desc",
+        dateEnd: "",
+        dateStart: "",
+        courseId: "",
+        className: "",
       });
-      const json = await response.json();
-      if (!json.success) throw new Error(json.message || "attendance request failed");
-      return (json.result?.records || []).map((row) => ({
-        studentNo: String(row.sno || row.stuNo || row.loginName || ""),
-        name: row.stuName || row.name || "",
-        className: row.className || "",
-        courseName: row.courseName || "",
-        signCount: Number(row.signCount || 0),
-        total: Number(row.total || 0),
-        notSignCount: Number(row.notSignCount || 0),
-        leaveCount: Number(row.leaveCount || 0),
-        lateCount: Number(row.lateCount || 0),
-        earlyCount: Number(row.earlyCount || 0),
-        signInRate: Number(row.signInRate || 0),
-        leaveReason: row.leaveReason || "",
-        leaveList: row.leaveList || "",
-      }));
-    })()`, 45000);
+      const wantedClasses = new Set(["信安24-01", "信安24实验班", "2024信安实验班", "信安25-04", "信安2504"]);
+      const records = (teacherRecords.records || []).filter((record) =>
+        (record.tno === ${JSON.stringify(teacher)} || record.teacherName === "傅继晗") &&
+        wantedClasses.has(record.className) &&
+        (!record.schoolYear || String(record.schoolYear).includes("2025-2026")) &&
+        (!record.schoolTerm || String(record.schoolTerm).includes("2"))
+      );
+
+      for (const record of records) {
+        const students = await getJson("attend/c/dean/getStuRecord/" + record.id, { page: "1", rows: "200" });
+        for (const student of students.records || []) {
+          const studentNo = String(student.sno || student.stuNo || "");
+          if (!studentNo) continue;
+          if (!byNo.has(studentNo)) {
+            byNo.set(studentNo, {
+              studentNo,
+              name: student.stuName || "",
+              className: record.className || student.className || "",
+              courseName: record.courseName || student.courseName || "",
+              signCount: 0,
+              total: 0,
+              notSignCount: 0,
+              leaveCount: 0,
+              lateCount: 0,
+              earlyCount: 0,
+              signInRate: 0,
+              publicLeaveCount: 0,
+              privateLeaveCount: 0,
+              sickLeaveCount: 0,
+              unknownLeaveCount: 0,
+              leaveReasons: [],
+              attendanceEvents: [],
+            });
+          }
+          const target = byNo.get(studentNo);
+          const event = {
+            date: record.cday || student.cday || "",
+            className: record.className || student.className || "",
+            courseName: record.courseName || student.courseName || "",
+            status: String(student.status || ""),
+            leaveReason: student.leaveReason || "",
+            recordId: record.id,
+          };
+          target.attendanceEvents.push(event);
+          if (event.status === "2") {
+            const reason = event.leaveReason || "";
+            target.leaveReasons.push([event.date, reason || "未填写原因"].join(":"));
+            if (/公|因公|公务|比赛|竞赛|学校|学院/.test(reason)) target.publicLeaveCount += 1;
+            else if (/病/.test(reason)) target.sickLeaveCount += 1;
+            else if (/私|事假/.test(reason)) target.privateLeaveCount += 1;
+            else target.unknownLeaveCount += 1;
+          }
+        }
+      }
+
+      for (const row of byNo.values()) {
+        const detailedLeaveCount =
+          row.publicLeaveCount + row.privateLeaveCount + row.sickLeaveCount + row.unknownLeaveCount;
+        if (detailedLeaveCount > 0) row.leaveCount = detailedLeaveCount;
+      }
+      return [...byNo.values()];
+    })()`, 90000);
     console.log(`attendance rows: ${rows.length}`);
     return { rows };
   } finally {
@@ -488,20 +575,24 @@ async function collectAttendance(cdpBase, term, teacher) {
 function attendanceScore(row) {
   if (!row) return { score: 100, penalty: 0, note: "无考勤记录，按不扣分处理" };
 
-  const reasonText = `${row.leaveReason || ""} ${row.leaveList || ""}`;
-  const publicLeave = /公假|因公|公务|比赛|竞赛|学院|学校/.test(reasonText) ? row.leaveCount : 0;
-  const privateLeave = Math.max(0, row.leaveCount - publicLeave);
+  const publicLeave = Number(row.publicLeaveCount || 0);
+  const sickLeave = Number(row.sickLeaveCount || 0);
+  const privateLeave = Number(row.privateLeaveCount || 0);
+  const unknownLeave = Number(row.unknownLeaveCount || 0);
   const penalty =
     row.notSignCount * 3 +
-    privateLeave * 1.5 +
     publicLeave * 0.5 +
+    sickLeave * 1 +
+    privateLeave * 1.5 +
+    unknownLeave * 1.5 +
     row.lateCount * 1 +
     row.earlyCount * 1;
-  const note = publicLeave
-    ? `含公假/因公请假 ${publicLeave} 次`
-    : row.leaveCount
-      ? "请假未能细分公私假，按普通请假扣分"
-      : "";
+  const parts = [];
+  if (publicLeave) parts.push(`公假${publicLeave}`);
+  if (sickLeave) parts.push(`病假${sickLeave}`);
+  if (privateLeave) parts.push(`私假${privateLeave}`);
+  if (unknownLeave) parts.push(`未分类请假${unknownLeave}`);
+  const note = parts.join("，");
 
   return { score: round(clamp(100 - penalty)), penalty: round(penalty), note };
 }
@@ -540,6 +631,11 @@ function buildGrades({ assignment, examScores, discussion, attendance }) {
         attendanceNote: att.note,
         notSignCount: attendanceRow?.notSignCount ?? "",
         leaveCount: attendanceRow?.leaveCount ?? "",
+        publicLeaveCount: attendanceRow?.publicLeaveCount ?? "",
+        privateLeaveCount: attendanceRow?.privateLeaveCount ?? "",
+        sickLeaveCount: attendanceRow?.sickLeaveCount ?? "",
+        unknownLeaveCount: attendanceRow?.unknownLeaveCount ?? "",
+        leaveReasons: (attendanceRow?.leaveReasons || []).join("；"),
         lateCount: attendanceRow?.lateCount ?? "",
         earlyCount: attendanceRow?.earlyCount ?? "",
         examSubmitTime: exam?.submitTime || "",
@@ -612,51 +708,19 @@ function writeOutputs(outDir, classes, metadata) {
   const jsonPath = path.join(outDir, "final-grade-report.json");
   fs.writeFileSync(jsonPath, JSON.stringify({ metadata, classes: Object.fromEntries(classes) }, null, 2));
 
-  for (const [className, rows] of classes) {
-    const csv = [
-      [
-        "排名",
-        "学号",
-        "姓名",
-        "平时成绩",
-        "期末成绩",
-        "最终成绩",
-        "是否及格",
-        "作业均分",
-        "讨论加分",
-        "考勤分",
-        "未签到",
-        "请假",
-        "迟到",
-        "早退",
-        "考勤备注",
-      ],
-      ...rows.map((row, index) => [
-        index + 1,
-        row.studentNo,
-        row.name,
-        row.ordinaryScore,
-        row.examScore,
-        row.finalScore,
-        row.passed ? "及格" : "不及格",
-        row.assignmentAverage,
-        row.discussionBonus,
-        row.attendanceScore,
-        row.notSignCount,
-        row.leaveCount,
-        row.lateCount,
-        row.earlyCount,
-        row.attendanceNote,
-      ]),
-    ]
-      .map((line) => line.map(csvEscape).join(","))
-      .join("\n");
-    fs.writeFileSync(path.join(outDir, `${className}.csv`), `\ufeff${csv}`);
-  }
-
   const htmlPath = path.join(outDir, "final-grade-report.html");
   fs.writeFileSync(htmlPath, renderHtml(classes, metadata));
-  return { jsonPath, htmlPath };
+  const xlsxPath = path.join(outDir, "final-grade-report.xlsx");
+  writeXlsx(jsonPath, xlsxPath);
+  return { jsonPath, htmlPath, xlsxPath };
+}
+
+function writeXlsx(jsonPath, xlsxPath) {
+  const helper = path.join(SCRIPT_DIR, "write_final_grade_xlsx.py");
+  const result = spawnSync("python3", [helper, jsonPath, xlsxPath], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`xlsx generation failed: ${result.stderr || result.stdout}`);
+  }
 }
 
 function renderHtml(classes, metadata) {
@@ -683,9 +747,14 @@ function renderHtml(classes, metadata) {
             <td>${row.attendanceScore}</td>
             <td>${htmlEscape(row.notSignCount)}</td>
             <td>${htmlEscape(row.leaveCount)}</td>
+            <td>${htmlEscape(row.publicLeaveCount)}</td>
+            <td>${htmlEscape(row.privateLeaveCount)}</td>
+            <td>${htmlEscape(row.sickLeaveCount)}</td>
+            <td>${htmlEscape(row.unknownLeaveCount)}</td>
             <td>${htmlEscape(row.lateCount)}</td>
             <td>${htmlEscape(row.earlyCount)}</td>
             <td>${htmlEscape(row.attendanceNote)}</td>
+            <td>${htmlEscape(row.leaveReasons)}</td>
           </tr>`,
         )
         .join("\n");
@@ -695,7 +764,7 @@ function renderHtml(classes, metadata) {
           <thead>
             <tr>
               <th>排名</th><th>学号</th><th>姓名</th><th>平时成绩</th><th>期末成绩</th><th>最终成绩</th><th>状态</th>
-              <th>作业均分</th><th>讨论加分</th><th>考勤分</th><th>未签到</th><th>请假</th><th>迟到</th><th>早退</th><th>考勤备注</th>
+              <th>作业均分</th><th>讨论加分</th><th>考勤分</th><th>未签到</th><th>请假</th><th>公假</th><th>私假</th><th>病假</th><th>未分类请假</th><th>迟到</th><th>早退</th><th>考勤备注</th><th>请假明细</th>
             </tr>
           </thead>
           <tbody>${body}</tbody>
@@ -769,7 +838,7 @@ async function main() {
     scoringPolicy: {
       passThreshold: PASS_THRESHOLD,
       ordinaryScore: "assignmentAverage * 0.85 + attendanceScore * 0.10 + discussionBonus(5)",
-      attendancePenalty: "notSign*3 + privateLeave*1.5 + publicLeave*0.5 + late*1 + early*1",
+      attendancePenalty: "notSign*3 + publicLeave*0.5 + sickLeave*1 + privateLeave*1.5 + unknownLeave*1.5 + late*1 + early*1",
       tieBreaker: "within equal pass counts, choose ordinary weight closest to 40%",
       constrainedSearch: [args.minOrdinaryWeight, args.maxOrdinaryWeight],
     },
@@ -782,6 +851,7 @@ async function main() {
     console.log(`${className}: ${passCount}/${rows.length} pass`);
   }
   console.log(`html: ${outputs.htmlPath}`);
+  console.log(`xlsx: ${outputs.xlsxPath}`);
   console.log(`json: ${outputs.jsonPath}`);
 }
 
