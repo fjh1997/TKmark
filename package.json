@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node mark.mjs",
-    "final-grades": "node scripts/final-grade-report.mjs"
+    "final-grades": "node scripts/final-grade-report.mjs",
+    "teacher-summary": "python3 scripts/generate_teacher_summary_docx.py"
   },
   "keywords": [
     "chaoxing",

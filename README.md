@@ -61,6 +61,32 @@ python3 scripts/build_attendance_roll_call_xlsx.py \
 
 如果 `final-grade-report.json` 中包含 `attendanceEvents` 逐次考勤明细，脚本优先按逐次事件填写每个日期的状态。如果只有汇总字段和 `leaveReasons`，则只能把有日期的请假填入对应日期，缺课、迟到、早退等无日期汇总会写入备注列。
 
+## 生成教师教学个人小结
+
+可以生成“浙江同济科技职业学院教师（教学）个人小结”Word 表格。脚本使用 Python 标准库直接写入 docx，不依赖 `python-docx`；竖排栏目采用逐字换行和竖排括号字符，避免 Word/WPS 打开后文字倾斜或括号方向不一致。
+
+三班合并填写时，可按课表核定各班授课节数后传入 `--class-hours`。例如本学期信安24-01 为 60 节、信安24实验班为 60 节、信安2504 为 62 节，合计 182 节，脚本会自动折算为理论 91 节、实训 91 节：
+
+```bash
+npm run teacher-summary -- \
+  --out out/teacher-summary/教师教学个人小结.docx \
+  --txt-out out/teacher-summary/教师教学个人小结.txt \
+  --date 2026-07-08 \
+  --class-hours 信安24-01=60,信安24实验班=60,信安2504=62
+```
+
+也可以直接指定课时：
+
+```bash
+python3 scripts/generate_teacher_summary_docx.py \
+  --out out/teacher-summary/教师教学个人小结.docx \
+  --total-hours 182 \
+  --theory-hours 91 \
+  --practice-hours 91
+```
+
+若只需要读取授课计划中的单门课程课时，可传入 `--teaching-plan-docx`。多人、多班合并填写时，建议优先按教师课表核定后使用 `--class-hours` 或手动指定理论/实训课时。
+
 ## 评分合成规则
 
 默认先计算平时原始分：
